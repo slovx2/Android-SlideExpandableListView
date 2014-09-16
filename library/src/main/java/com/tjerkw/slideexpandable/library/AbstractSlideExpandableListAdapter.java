@@ -1,15 +1,17 @@
 package com.tjerkw.slideexpandable.library;
 
+import java.util.BitSet;
+import android.graphics.Rect;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.util.SparseIntArray;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.animation.Animation;
+import android.view.animation.Animation.AnimationListener;
 import android.widget.LinearLayout;
 import android.widget.ListAdapter;
-
-import java.util.BitSet;
+import android.widget.ListView;
 
 /**
  * Wraps a ListAdapter to give it expandable list view functionality.
@@ -54,12 +56,75 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 	 */
 	private final SparseIntArray viewHeights = new SparseIntArray(10);
 
+	/**
+	* Will point to the ListView
+	*/
+	private ViewGroup parent;
+
 	public AbstractSlideExpandableListAdapter(ListAdapter wrapped) {
 		super(wrapped);
 	}
 
+	private OnItemExpandCollapseListener expandCollapseListener;
+
+	/**
+	 * Sets a listener which gets call on item expand or collapse
+	 * 
+	 * @param listener
+	 *            the listener which will be called when an item is expanded or
+	 *            collapsed
+	 */
+	public void setItemExpandCollapseListener(
+			OnItemExpandCollapseListener listener) {
+		expandCollapseListener = listener;
+	}
+
+	public void removeItemExpandCollapseListener() {
+		expandCollapseListener = null;
+	}
+
+	/**
+	 * Interface for callback to be invoked whenever an item is expanded or
+	 * collapsed in the list view.
+	 */
+	public interface OnItemExpandCollapseListener {
+		/**
+		 * Called when an item is expanded.
+		 * 
+		 * @param itemView
+		 *            the view of the list item
+		 * @param position
+		 *            the position in the list view
+		 */
+		public void onExpand(View itemView, int position);
+
+		/**
+		 * Called when an item is collapsed.
+		 * 
+		 * @param itemView
+		 *            the view of the list item
+		 * @param position
+		 *            the position in the list view
+		 */
+		public void onCollapse(View itemView, int position);
+
+	}
+
+	private void notifiyExpandCollapseListener(int type, View view, int position) {
+		if (expandCollapseListener != null) {
+			if (type == ExpandCollapseAnimation.EXPAND) {
+				expandCollapseListener.onExpand(view, position);
+			} else if (type == ExpandCollapseAnimation.COLLAPSE) {
+				expandCollapseListener.onCollapse(view, position);
+			}
+		}
+
+	}
+
+
 	@Override
 	public View getView(int position, View view, ViewGroup viewGroup) {
+		this.parent = viewGroup;
 		view = wrapped.getView(position, view, viewGroup);
 		enableFor(view, position);
 		return view;
@@ -140,6 +205,7 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 		itemToolbar.measure(parent.getWidth(), parent.getHeight());
 
 		enableFor(more, itemToolbar, position);
+		itemToolbar.requestLayout();
 	}
 
 
@@ -203,6 +269,9 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 						if (lastOpenPosition != -1 && lastOpenPosition != position) {
 							if (lastOpen != null) {
 								animateView(lastOpen, ExpandCollapseAnimation.COLLAPSE);
+								notifiyExpandCollapseListener(
+										ExpandCollapseAnimation.COLLAPSE,
+										lastOpen, lastOpenPosition);
 							}
 							openItems.set(lastOpenPosition, false);
 						}
@@ -212,6 +281,7 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 						lastOpenPosition = -1;
 					}
 					animateView(target, type);
+					notifiyExpandCollapseListener(type, target, position);
 				}
 			}
 		});
@@ -241,6 +311,38 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 				type
 		);
 		anim.setDuration(getAnimationDuration());
+		anim.setAnimationListener(new AnimationListener() {
+
+			@Override
+			public void onAnimationStart(Animation animation) {}
+
+			@Override
+			public void onAnimationRepeat(Animation animation) {}
+
+			@Override
+			public void onAnimationEnd(Animation animation) {
+				if (type == ExpandCollapseAnimation.EXPAND) {
+					if (parent instanceof ListView) {
+						ListView listView = (ListView) parent;
+						int movement = target.getBottom();
+
+						Rect r = new Rect();
+						boolean visible = target.getGlobalVisibleRect(r);
+						Rect r2 = new Rect();
+						listView.getGlobalVisibleRect(r2);
+						
+						if (!visible) {
+							listView.smoothScrollBy(movement, getAnimationDuration());
+						} else {
+							if (r2.bottom == r.bottom) {
+								listView.smoothScrollBy(movement, getAnimationDuration());
+							}
+						}
+					}
+				}
+
+			}
+		});
 		target.startAnimation(anim);
 	}
 
@@ -274,17 +376,23 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 
 	public void onRestoreInstanceState(SavedState state) {
 
-		this.lastOpenPosition = state.lastOpenPosition;
-		this.openItems = state.openItems;
+		if (state != null) {
+			this.lastOpenPosition = state.lastOpenPosition;
+			this.openItems = state.openItems;
+		}
 	}
 
 	/**
 	 * Utility methods to read and write a bitset from and to a Parcel
 	 */
 	private static BitSet readBitSet(Parcel src) {
+		BitSet set = new BitSet();
+		if (src == null) {
+			return set;
+		}
 		int cardinality = src.readInt();
 
-		BitSet set = new BitSet();
+
 		for (int i = 0; i < cardinality; i++) {
 			set.set(src.readInt());
 		}
@@ -294,6 +402,10 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 
 	private static void writeBitSet(Parcel dest, BitSet set) {
 		int nextSetBit = -1;
+
+		if (dest == null || set == null) {
+			return; // at least dont crash
+		}
 
 		dest.writeInt(set.cardinality());
 
@@ -315,15 +427,15 @@ public abstract class AbstractSlideExpandableListAdapter extends WrapperListAdap
 
 		private SavedState(Parcel in) {
 			super(in);
-            lastOpenPosition = in.readInt();
-            openItems = readBitSet(in);
+			lastOpenPosition = in.readInt();
+			openItems = readBitSet(in);
 		}
 
 		@Override
 		public void writeToParcel(Parcel out, int flags) {
 			super.writeToParcel(out, flags);
-            out.writeInt(lastOpenPosition);
-            writeBitSet(out, openItems);
+			out.writeInt(lastOpenPosition);
+			writeBitSet(out, openItems);
 		}
 
 		//required field that makes Parcelables from a Parcel
